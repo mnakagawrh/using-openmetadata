@@ -3,8 +3,13 @@
 
 使い方:
   work/.venv/bin/python work/openmetadata-yaml-loader.py work/lineage/shipment-ingest.yaml
+  work/.venv/bin/python work/openmetadata-yaml-loader.py work/lineage/datagrid-cache-dummy.yaml
 
-実 Kafka / HUB には接続しない。既定はローカル Quick Start
+node.type:
+  topic / pipeline … そのまま
+  table / cache   … Database の Table（DataGrid キャッシュの見立て）
+
+実 Kafka / System には接続しない。既定はローカル Quick Start
 (http://localhost:8585, admin / admin)。
 """
 
@@ -32,6 +37,15 @@ DEFAULT_YAML = Path(__file__).resolve().parent / "lineage" / "shipment-ingest.ya
 NODE_TYPE_TO_OM = {
     "topic": "topic",
     "pipeline": "pipeline",
+    "table": "table",
+    "cache": "table",
+}
+
+UI_PATH = {
+    "topic": "topic",
+    "pipeline": "pipeline",
+    "table": "table",
+    "cache": "table",
 }
 
 
@@ -99,6 +113,47 @@ def upsert_services(token: str, spec: dict) -> None:
             },
         )
         print(f"pipeline service: {created['fullyQualifiedName']}")
+    for svc in services.get("databases") or []:
+        created = put(
+            token,
+            "/api/v1/services/databaseServices",
+            {
+                "name": svc["name"],
+                "displayName": svc.get("displayName", svc["name"]),
+                "serviceType": svc.get("serviceType", "CustomDatabase"),
+                "description": svc.get("description", ""),
+                "connection": {"config": svc["connection"]},
+            },
+        )
+        print(f"database service: {created['fullyQualifiedName']}")
+        db_name = svc.get("database", "caches")
+        schema_name = svc.get("schema", "default")
+        ensure_schema(token, svc["name"], db_name, schema_name, svc.get("description", ""))
+
+
+def ensure_schema(
+    token: str, service: str, database: str, schema: str, description: str = ""
+) -> str:
+    db = put(
+        token,
+        "/api/v1/databases",
+        {
+            "name": database,
+            "service": service,
+            "description": description or "DataGrid caches (dummy)",
+        },
+    )
+    sch = put(
+        token,
+        "/api/v1/databaseSchemas",
+        {
+            "name": schema,
+            "database": db["fullyQualifiedName"],
+            "description": description or "DataGrid cache namespace (dummy)",
+        },
+    )
+    print(f"schema: {sch['fullyQualifiedName']}")
+    return sch["fullyQualifiedName"]
 
 
 def upsert_nodes(token: str, spec: dict) -> dict[str, dict]:
@@ -128,6 +183,29 @@ def upsert_nodes(token: str, spec: dict) -> dict[str, dict]:
                     "service": node["service"],
                     "description": node.get("description", ""),
                     "tasks": node.get("tasks") or [],
+                },
+            )
+        elif node_type in ("table", "cache"):
+            schema_fqn = ensure_schema(
+                token,
+                node["service"],
+                node.get("database", "caches"),
+                node.get("schema", "default"),
+                node.get("description", ""),
+            )
+            columns = node.get("columns") or [
+                {"name": "key", "dataType": "VARCHAR", "dataLength": 256}
+            ]
+            entity = put(
+                token,
+                "/api/v1/tables",
+                {
+                    "name": node["name"],
+                    "displayName": node.get("displayName", node["name"]),
+                    "databaseSchema": schema_fqn,
+                    "description": node.get("description", ""),
+                    "tableType": "Regular",
+                    "columns": columns,
                 },
             )
         else:
@@ -184,7 +262,8 @@ def main(argv: list[str]) -> int:
     for node in spec.get("nodes") or []:
         entity = nodes[node["id"]]
         kind = node["type"]
-        print(f"  {kind:8s} {BASE}/{kind}/{entity['fullyQualifiedName']}")
+        path = UI_PATH.get(kind, kind)
+        print(f"  {kind:8s} {BASE}/{path}/{entity['fullyQualifiedName']}")
     return 0
 
 
